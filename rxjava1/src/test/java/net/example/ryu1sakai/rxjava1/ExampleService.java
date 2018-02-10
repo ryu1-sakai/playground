@@ -36,15 +36,23 @@ public class ExampleService {
 
     private static class FooStorage {
         private Observable<Foo> getFoo(int id) {
+            if (id == Integer.MAX_VALUE) {
+                return Observable.empty();
+            }
             return Observable.just(new Foo(id));
         }
     }
 
-    private static class FooService {
+    private interface FooService {
+        Observable<Foo> getFoo(int userId);
+    }
+
+    private static class SimpleFooService implements FooService {
         private UserStorage userStorage = new UserStorage();
         private FooStorage fooStorage = new FooStorage();
 
-        private Observable<Foo> getFoo(int userId) {
+        @Override
+        public Observable<Foo> getFoo(int userId) {
             if (userId <= 0) {
                 return Observable.error(new Exception("Invalid user ID"));
             }
@@ -55,21 +63,48 @@ public class ExampleService {
         }
     }
 
+    private static class VerboseFooService implements FooService {
+        private UserStorage userStorage = new UserStorage();
+        private FooStorage fooStorage = new FooStorage();
+
+        @Override
+        public Observable<Foo> getFoo(int userId) {
+            if (userId <= 0) {
+                return Observable.error(new Exception("Invalid user ID " + userId));
+            }
+            return userStorage.getFooId(userId)
+                    .switchIfEmpty(Observable.error(new Exception(String.format("User %d not found", userId))))
+                    .flatMap(fid -> {
+                        String emptyError = String.format("Foo %d not found", fid);
+                        return fooStorage.getFoo(fid).switchIfEmpty(Observable.error(new Exception(emptyError)));
+                    });
+        }
+    }
+
     private static class FooServer {
-        private final FooService fooService = new FooService();
+        private final FooService simpleFooService = new SimpleFooService();
+        private final FooService verboseFooService = new VerboseFooService();
         private final Subscriber<Response> subscriber;
 
         private FooServer(Subscriber<Response> subscriber) {
             this.subscriber = subscriber;
         }
 
-        private void getFoo(Request request) {
-            fooService.getFoo(request.getUserId())
+        private void getFoo(FooService service, Request request) {
+            service.getFoo(request.getUserId())
                     .map(NormalResponse::new)
                     .ofType(Response.class)
                     .onErrorReturn(e -> new ErrorResponse(e.getMessage()))
                     .switchIfEmpty(Observable.just(new ErrorResponse("Unknown error")))
                     .subscribe(subscriber::onNext);
+        }
+
+        private void getFooSimple(Request request) {
+            getFoo(simpleFooService, request);
+        }
+
+        private void getFooVerbose(Request request) {
+            getFoo(verboseFooService, request);
         }
     }
 
@@ -77,8 +112,10 @@ public class ExampleService {
         TestSubscriber<Response> subscriber = new TestSubscriber<>();
         FooServer server = new FooServer(subscriber);
 
-        server.getFoo(new Request(100));
-        server.getFoo(new Request(-1));
-        subscriber.assertValues(new NormalResponse(new Foo(100)), new ErrorResponse("Invalid user ID"));
+        server.getFooSimple(new Request(100));
+        server.getFooSimple(new Request(-1));
+        server.getFooVerbose(new Request(Integer.MAX_VALUE));
+        subscriber.assertValues(new NormalResponse(new Foo(100)), new ErrorResponse("Invalid user ID"),
+                new ErrorResponse(String.format("Foo %d not found", Integer.MAX_VALUE)));
     }
 }
